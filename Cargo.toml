@@ -8,9 +8,9 @@ optimize = ["log/release_max_level_warn"]
 default = ["optimize"]
 
 [profile.release]
-lto = true
-codegen-units = 1
-strip = true
+# lto = true
+# codegen-units = 1
+debug = true
 
 [dependencies]
 byteorder = "1"
