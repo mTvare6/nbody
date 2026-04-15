@@ -32,12 +32,44 @@ impl Default for Particle {
     }
 }
 
+struct Arena {
+    arena: Vec<QuadNode>,
+    index: usize,
+}
+
+impl Arena {
+    fn new(capacity: usize) -> Self {
+        let arena = Vec::with_capacity(capacity);
+        let index = 0;
+        Self { arena, index }
+    }
+
+    fn push(&mut self, node: QuadNode) -> usize {
+        self.arena.push(node);
+        self.index += 1;
+        self.index
+    }
+
+    fn get_mut(&mut self, index: usize) -> &mut QuadNode {
+        unsafe { self.arena.get_unchecked_mut(index) }
+    }
+
+    fn get(&self, index: usize) -> &QuadNode {
+        unsafe { self.arena.get_unchecked(index) }
+    }
+
+    fn reset(&mut self) {
+        self.arena.clear();
+        self.index = 0;
+    }
+}
+
 // An enum for quad tree, either holds a final node with Some(index of particle) or None
 // or Branch, which is 4 quadrants within it
 #[derive(Clone)]
 enum QuadTree {
     Leaf(Option<usize>),
-    Branch([Box<QuadNode>; 4]),
+    Branch([usize; 4]),
 }
 
 // Metadata associated with Quadtree, such as position, width, height, mass contained within the
@@ -52,92 +84,19 @@ struct QuadNode {
     qt: QuadTree,
 }
 
-impl Default for QuadNode {
-    fn default() -> Self {
+impl QuadNode {
+    fn with_width_height(width: f32, height: f32) -> Self {
         Self {
             top_left: Vec2::ZERO,
-            width: 0.,
-            height: 0.,
+            width,
+            height,
             center_of_mass_sum: Vec2::ZERO,
             mass: 0.,
             qt: QuadTree::Leaf(None),
         }
     }
-}
 
-impl QuadNode {
-    fn put(&mut self, i: usize, particles: &Vec<Particle>) {
-        let p = particles[i];
-        match &mut self.qt {
-            QuadTree::Leaf(particle) => {
-                self.center_of_mass_sum += p.mass * p.r;
-                self.mass += p.mass;
-                match particle.take() {
-                    // If the leaf is empty, simply add particle
-                    None => {
-                        self.qt = QuadTree::Leaf(Some(i));
-                    }
-                    // If the leaf is occupied, split it into quadrants and to individual quad
-                    // The quadtree associated with the node becomes a branch
-                    Some(u) => {
-                        let base = QuadNode {
-                            width: self.width / 2.,
-                            height: self.height / 2.,
-                            ..Default::default()
-                        };
-                        self.qt = QuadTree::Branch([
-                            Box::new(QuadNode {
-                                top_left: Vec2 {
-                                    x: self.top_left.x + self.width / 2.,
-                                    y: self.top_left.y,
-                                },
-                                ..base.clone()
-                            }),
-                            Box::new(QuadNode {
-                                top_left: Vec2 {
-                                    x: self.top_left.x,
-                                    y: self.top_left.y,
-                                },
-                                ..base.clone()
-                            }),
-                            Box::new(QuadNode {
-                                top_left: Vec2 {
-                                    x: self.top_left.x,
-                                    y: self.top_left.y + self.height / 2.,
-                                },
-                                ..base.clone()
-                            }),
-                            Box::new(QuadNode {
-                                top_left: Vec2 {
-                                    x: self.top_left.x + self.width / 2.,
-                                    y: self.top_left.y + self.height / 2.,
-                                },
-                                ..base
-                            }),
-                        ]);
-                        self.put(u, particles);
-                        self.put(i, particles);
-                    }
-                }
-            }
-            // check which leaf in branch has the coordinates required to fit in the particle, and try
-            // putting in it
-            QuadTree::Branch(branch) => {
-                for ix in 0..4 {
-                    if branch[ix].top_left.x < p.r.x
-                        && p.r.x < branch[ix].top_left.x + branch[ix].width
-                        && branch[ix].top_left.y < p.r.y
-                        && p.r.y < branch[ix].top_left.y + branch[ix].height
-                    {
-                        branch[ix].put(i, particles);
-                        break;
-                    }
-                }
-            }
-        };
-    }
-
-    fn calculate_field(&self, i: usize, particles: &mut Vec<Particle>) {
+    fn calculate_field(&self, i: usize, particles: &mut Vec<Particle>, arena: &Arena) {
         match &self.qt {
             // for a node with single particle, ie leaf, calculate the distance separate
             &QuadTree::Leaf(Some(j)) => {
@@ -162,13 +121,94 @@ impl QuadNode {
                     particles[i].field += r * scale;
                 } else {
                     for ix in 0..4 {
-                        branch[ix].calculate_field(i, particles);
+                        let node = arena.get(branch[ix]);
+                        node.calculate_field(i, particles, arena);
                     }
                 }
             }
             _ => {}
         }
     }
+}
+
+fn put(
+    parent_node_index: usize,
+    particle_index: usize,
+    particles: &Vec<Particle>,
+    arena: &mut Arena,
+) {
+    let current_particle = particles[particle_index];
+    let node = arena.get(parent_node_index);
+    match &node.qt {
+        QuadTree::Leaf(particle_container) => {
+            // NLL magic
+            let top_left = node.top_left;
+            let height = node.height;
+            let width = node.width;
+            match *particle_container {
+                // If the leaf is empty, simply add particle
+                None => {
+                    let node = arena.get_mut(parent_node_index);
+                    node.qt = QuadTree::Leaf(Some(particle_index));
+                }
+                // If the leaf is occupied, split it into quadrants and to individual quad
+                // The quadtree associated with the node becomes a branch
+                Some(other_particle_index) => {
+                    let base = QuadNode::with_width_height(node.width * 0.5, node.height * 0.5);
+                    let i = arena.push(QuadNode {
+                        top_left: Vec2 {
+                            x: top_left.x + width / 2.,
+                            y: top_left.y,
+                        },
+                        ..base.clone()
+                    });
+                    let j = arena.push(QuadNode {
+                        top_left: Vec2 {
+                            x: top_left.x,
+                            y: top_left.y,
+                        },
+                        ..base.clone()
+                    });
+                    let k = arena.push(QuadNode {
+                        top_left: Vec2 {
+                            x: top_left.x,
+                            y: top_left.y + height / 2.,
+                        },
+                        ..base.clone()
+                    });
+                    let l = arena.push(QuadNode {
+                        top_left: Vec2 {
+                            x: top_left.x + width / 2.,
+                            y: top_left.y + height / 2.,
+                        },
+                        ..base
+                    });
+
+                    let node = arena.get_mut(parent_node_index);
+                    node.qt = QuadTree::Branch([i, j, k, l]);
+                    node.center_of_mass_sum += current_particle.mass * current_particle.r;
+                    node.mass += current_particle.mass;
+                    put(parent_node_index, other_particle_index, particles, arena);
+                    put(parent_node_index, particle_index, particles, arena);
+                }
+            }
+        }
+        // check which leaf in branch has the coordinates required to fit in the particle, and try
+        // putting in it
+        QuadTree::Branch(branch) => {
+            for ix in 0..4 {
+                let branch_node = arena.get(branch[ix]);
+                if branch_node.top_left.x < current_particle.r.x
+                    && current_particle.r.x < branch_node.top_left.x + branch_node.width
+                    && branch_node.top_left.y < current_particle.r.y
+                    && current_particle.r.y < branch_node.top_left.y + branch_node.height
+                {
+                    put(branch[ix], particle_index, particles, arena);
+                    break;
+                }
+            }
+        }
+    };
 }
 
 fn main() {
@@ -206,14 +246,16 @@ fn main() {
         });
     }
 
-    // let mut arena: Vec<QuadNode> = Vec::with_capacity(N * 4);
+    let mut arena = Arena::new(N * 4);
 
     // Used for deltatime later on
     let dt = 1. / 60.;
 
     let mut stop = 0;
     loop {
-        let mut root = QuadNode {
+        arena.reset();
+
+        let root = QuadNode {
             top_left: Vec2::ZERO,
             width: WIDTH as f32,
             height: HEIGHT as f32,
@@ -221,6 +263,8 @@ fn main() {
             mass: 0.,
             qt: QuadTree::Leaf(None),
         };
+
+        arena.arena.push(root);
 
         // build tree
         for i in 0..particles.len() {
@@ -244,11 +288,12 @@ fn main() {
                 particles[i].first_iter = true;
             }
             // Try adding the particle to root
-            root.put(i, &particles);
+            put(0, i, &particles, &mut arena);
         }
 
         for i in 0..particles.len() {
-            root.calculate_field(i, &mut particles);
+            let root = arena.get(0);
+            root.calculate_field(i, &mut particles, &arena);
         }
         for i in 0..particles.len() {
             // using particles[i].v = particles[i].field*dt returns an error, telling to use a
