@@ -102,9 +102,10 @@ impl QuadNode {
             &QuadTree::Leaf(Some(j)) => {
                 if i != j {
                     let r = particles[j].r - particles[i].r;
-                    let d = (r.length_squared() + SOFTENING * SOFTENING).sqrt();
+                    let d_sq = r.length_squared() + SOFTENING * SOFTENING;
+                    let d_inv = d_sq.sqrt().recip();
                     let m = particles[j].mass;
-                    let scale = GRAV * m / (d * d * d);
+                    let scale = GRAV * m * (d_inv * d_inv * d_inv);
                     let field = scale * r;
                     particles[i].field += field;
                 }
@@ -114,10 +115,11 @@ impl QuadNode {
             QuadTree::Branch(branch) => {
                 let m = self.mass;
                 let r = self.center_of_mass_sum / m - particles[i].r;
-                let d = (r.length_squared() + SOFTENING * SOFTENING).sqrt();
+                let d_sq = r.length_squared() + SOFTENING * SOFTENING;
+                let d_inv = d_sq.sqrt().recip();
                 let s = self.width;
-                if s / d <= THETA {
-                    let scale = GRAV * m / (d * d * d);
+                if s * d_inv <= THETA {
+                    let scale = GRAV * m * (d_inv * d_inv * d_inv);
                     particles[i].field += r * scale;
                 } else {
                     for ix in 0..4 {
